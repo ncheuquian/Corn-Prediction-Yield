@@ -654,46 +654,98 @@ class TiffModelTrainer:
         return model, history
     
     def evaluate_model(self, model, X_val, y_val_scaled, y_val):
-        """Evaluate the trained model and generate plots"""
-        print("\nEvaluating model...")
-        
-        # Make predictions
-        y_pred_scaled = model.predict(X_val)
-        
-        # Inverse transform to original scale
-        y_pred = self.output_scaler.inverse_transform(y_pred_scaled).flatten()
-        
-        # Calculate metrics
-        mse = np.mean((y_pred - y_val) ** 2)
-        rmse = np.sqrt(mse)
-        mae = np.mean(np.abs(y_pred - y_val))
-        
-        # Calculate R² (coefficient of determination)
-        ss_tot = np.sum((y_val - np.mean(y_val)) ** 2)
-        ss_res = np.sum((y_val - y_pred) ** 2)
-        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
-        
-        print("\nModel Performance Metrics:")
-        print(f"Mean Squared Error (MSE): {mse:.2f}")
-        print(f"Root Mean Squared Error (RMSE): {rmse:.2f}")
-        print(f"Mean Absolute Error (MAE): {mae:.2f}")
-        print(f"R-squared (R²): {r2:.4f}")
-        
-        # Save metrics to file
-        with open(os.path.join(self.model_dir, "metrics.txt"), "w") as f:
-            f.write(f"Mean Squared Error (MSE): {mse:.4f}\n")
-            f.write(f"Root Mean Squared Error (RMSE): {rmse:.4f}\n")
-            f.write(f"Mean Absolute Error (MAE): {mae:.4f}\n")
-            f.write(f"R-squared (R²): {r2:.4f}\n")
-            f.write(f"Training configuration:\n")
-            for key, value in vars(self.config).items():
-                f.write(f"  {key}: {value}\n")
-        
-        # Plot predictions vs actual
-        plt.figure(figsize=(10, 6))
-        plt.scatter(y_val, y_pred, alpha=0.5)
-        plt.plot([y_val.min(), y_val.max()], [y_val.min(), y_val.max()], 'r--')
-        plt.xlabel('Actual Yield (bushels/acre)')
-        plt.ylabel('Predicted Yield (bushels/acre)')
-        plt.title(f'Actual vs Predicted Maize Yield (R² = {r2:.4f})')
-        plt.savefig(os.path.join(self.model_dir, 'yield_prediction_
+    """Evaluate the trained model and generate plots"""
+    print("\nEvaluating model...")
+    
+    # Make predictions
+    y_pred_scaled = model.predict(X_val)
+    
+    # Inverse transform to original scale
+    y_pred = self.output_scaler.inverse_transform(y_pred_scaled).flatten()
+    
+    # Calculate metrics
+    mse = np.mean((y_pred - y_val) ** 2)
+    rmse = np.sqrt(mse)
+    mae = np.mean(np.abs(y_pred - y_val))
+    
+    # Calculate R² (coefficient of determination)
+    ss_tot = np.sum((y_val - np.mean(y_val)) ** 2)
+    ss_res = np.sum((y_val - y_pred) ** 2)
+    r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+    
+    print("\nModel Performance Metrics:")
+    print(f"Mean Squared Error (MSE): {mse:.2f}")
+    print(f"Root Mean Squared Error (RMSE): {rmse:.2f}")
+    print(f"Mean Absolute Error (MAE): {mae:.2f}")
+    print(f"R-squared (R²): {r2:.4f}")
+    
+    # Save metrics to file
+    with open(os.path.join(self.model_dir, "metrics.txt"), "w") as f:
+        f.write(f"Mean Squared Error (MSE): {mse:.4f}\n")
+        f.write(f"Root Mean Squared Error (RMSE): {rmse:.4f}\n")
+        f.write(f"Mean Absolute Error (MAE): {mae:.4f}\n")
+        f.write(f"R-squared (R²): {r2:.4f}\n")
+        f.write(f"Training configuration:\n")
+        for key, value in vars(self.config).items():
+            f.write(f"  {key}: {value}\n")
+    
+    # Plot predictions vs actual
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_val, y_pred, alpha=0.5)
+    plt.plot([y_val.min(), y_val.max()], [y_val.min(), y_val.max()], 'r--')
+    plt.xlabel('Actual Yield (bushels/acre)')
+    plt.ylabel('Predicted Yield (bushels/acre)')
+    plt.title(f'Actual vs Predicted Maize Yield (R² = {r2:.4f})')
+    plt.savefig(os.path.join(self.model_dir, 'yield_prediction_results.png'))
+    plt.close()
+    
+    # Create additional evaluation plots
+    
+    # Plot error distribution
+    errors = y_val - y_pred
+    plt.figure(figsize=(10, 6))
+    plt.hist(errors, bins=20, color='skyblue', edgecolor='black')
+    plt.axvline(x=0, color='red', linestyle='--')
+    plt.xlabel('Prediction Error (bushels/acre)')
+    plt.ylabel('Frequency')
+    plt.title('Distribution of Prediction Errors')
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(self.model_dir, 'error_distribution.png'))
+    plt.close()
+    
+    # Plot sorted predictions vs actual
+    sorted_indices = np.argsort(y_val)
+    plt.figure(figsize=(12, 6))
+    plt.plot(np.arange(len(y_val)), y_val[sorted_indices], 'b-', label='Actual Yield')
+    plt.plot(np.arange(len(y_pred)), y_pred[sorted_indices], 'r-', label='Predicted Yield')
+    plt.fill_between(np.arange(len(y_val)), 
+                     y_val[sorted_indices], 
+                     y_pred[sorted_indices], 
+                     alpha=0.2, 
+                     color='gray')
+    plt.xlabel('Sorted Sample Index')
+    plt.ylabel('Yield (bushels/acre)')
+    plt.title('Sorted Actual vs Predicted Yields')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(self.model_dir, 'sorted_predictions.png'))
+    plt.close()
+    
+    # Save prediction results to CSV
+    results_df = pd.DataFrame({
+        'Actual_Yield': y_val,
+        'Predicted_Yield': y_pred,
+        'Absolute_Error': np.abs(y_val - y_pred),
+        'Relative_Error_Percent': 100 * np.abs(y_val - y_pred) / y_val
+    })
+    results_df.to_csv(os.path.join(self.model_dir, 'prediction_results.csv'), index=False)
+    
+    # Calculate and return metrics
+    metrics = {
+        'mse': mse,
+        'rmse': rmse,
+        'mae': mae,
+        'r2': r2
+    }
+    
+    return metrics
