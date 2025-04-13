@@ -1,37 +1,699 @@
-# Maize Yield Prediction from Satellite Imagery
-# Hackathon Demo Notebook
+#!/usr/bin/env python3
+"""
+TIFF-based Maize Yield Prediction Model Training
+------------------------------------------------
+This script focuses on training a TensorFlow model specifically optimized
+for multi-spectral TIFF satellite imagery of maize crops.
+"""
 
-# %% [markdown]
-# # Maize Yield Prediction from Satellite Imagery
-# 
-# This notebook demonstrates a complete machine learning pipeline for predicting maize crop yields from satellite imagery using TensorFlow. We'll analyze data from 2022 and 2023 maize field experiments.
-
-# %% [markdown]
-# ## 1. Setup and Imports
-
-# %%
 import os
+import glob
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras import layers, models
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras import layers, models, optimizers
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from tensorflow.keras.optimizers import Adam
 import rasterio
-import glob
+from rasterio.errors import RasterioIOError
+from datetime import datetime
+import time
 from tqdm import tqdm
+import argparse
+import pickle
+import warnings
 
-# Check if GPU is available
-print("TensorFlow version:", tf.__version__)
-print("GPU Available:", tf.config.list_physical_devices('GPU'))
+# Suppress warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 # Set seeds for reproducibility
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 tf.random.set_seed(RANDOM_SEED)
 
-# Configuration
-DATA_DIR = "/path/to
+class TiffModelTrainer:
+    """Class for training models on TIFF satellite imagery"""
+    
+    def __init__(self, config):
+        """Initialize the trainer with configuration parameters"""
+        self.config = config
+        self.data_dir = config.data_dir
+        self.output_dir = config.output_dir
+        self.image_size = (config.image_size, config.image_size)
+        self.batch_size = config.batch_size
+        self.epochs = config.epochs
+        self.learning_rate = config.learning_rate
+        self.random_seed = RANDOM_SEED
+        
+        # Create model output directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.model_dir = os.path.join(self.output_dir, f"model_{timestamp}")
+        os.makedirs(self.model_dir, exist_ok=True)
+        
+        # Initialize scalers
+        self.input_scaler = None
+        self.output_scaler = StandardScaler()
+        
+        # Configure TensorFlow
+        self._configure_tensorflow()
+        
+        # Create TensorBoard log directory
+        self.log_dir = os.path.join(self.model_dir, "logs")
+        os.makedirs(self.log_dir, exist_ok=True)
+        
+    def _configure_tensorflow(self):
+        """Configure TensorFlow settings"""
+        # Check for GPUs
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            try:
+                # Set memory growth to avoid taking all GPU memory
+                for gpu in gpus:
+                    tf.config.experimental.set_memory_growth(gpu, True)
+                print(f"GPU(s) detected: {len(gpus)}")
+            except RuntimeError as e:
+                print(f"GPU configuration error: {e}")
+        else:
+            print("No GPUs detected. Running on CPU.")
+            
+        # Set global TensorFlow config
+        tf.config.threading.set_inter_op_parallelism_threads(8)
+        tf.config.threading.set_intra_op_parallelism_threads(8)
+    
+    def load_ground_truth(self):
+        """Load and process ground truth data"""
+        print("Loading ground truth data...")
+        
+        # Try to find and load ground truth files
+        gt_files = []
+        
+        # 2022 data
+        if self.config.year_2022:
+            gt_file_2022 = os.path.join(self.data_dir, "GroundTruth", "HYBRID_HIPS_V3.5_ALLPLOTS.csv")
+            if os.path.exists(gt_file_2022):
+                gt_files.append((2022, gt_file_2022))
+            else:
+                print(f"Warning: 2022 ground truth file not found at {gt_file_2022}")
+        
+        # 2023 data
+        if self.config.year_2023:
+            gt_file_2023 = os.path.join(self.data_dir, "GroundTruth", "train_HIPS_HYBRIDS_2023_V2.3.csv")
+            if os.path.exists(gt_file_2023):
+                gt_files.append((2023, gt_file_2023))
+            else:
+                print(f"Warning: 2023 ground truth file not found at {gt_file_2023}")
+        
+        if not gt_files:
+            raise FileNotFoundError("No ground truth files found. Check your data directory structure.")
+        
+        # Load and combine ground truth data
+        ground_truth_data = []
+        for year, file_path in gt_files:
+            try:
+                df = pd.read_csv(file_path)
+                df['year'] = year
+                ground_truth_data.append(df)
+                print(f"Loaded {year} ground truth data: {len(df)} records")
+            except Exception as e:
+                print(f"Error loading {year} ground truth data: {e}")
+        
+        if not ground_truth_data:
+            raise ValueError("No ground truth data could be loaded")
+            
+        # Combine data if multiple years
+        if len(ground_truth_data) > 1:
+            ground_truth = pd.concat(ground_truth_data, ignore_index=True)
+        else:
+            ground_truth = ground_truth_data[0]
+        
+        # Filter for specific locations if requested
+        if self.config.locations:
+            location_list = [loc.strip() for loc in self.config.locations.split(',')]
+            ground_truth = ground_truth[ground_truth['field'].isin(location_list)]
+            print(f"Filtered for locations {location_list}: {len(ground_truth)} records")
+        
+        # Clean and prepare data
+        ground_truth = ground_truth.dropna(subset=['yieldPerAcre'])
+        print(f"Records with valid yield data: {len(ground_truth)}")
+        
+        # Print summary statistics
+        print("\nYield Statistics:")
+        yield_stats = ground_truth['yieldPerAcre'].describe()
+        for stat, value in yield_stats.items():
+            print(f"  {stat}: {value:.2f}")
+        
+        return ground_truth
+    
+    def load_and_process_tiff(self, file_path):
+        """Load and preprocess a TIFF image"""
+        try:
+            with rasterio.open(file_path) as src:
+                # Read all bands
+                image = src.read()
+                
+                # Check if image is valid
+                if image.size == 0 or np.all(image == 0):
+                    return None
+                
+                # Transpose from (bands, height, width) to (height, width, bands)
+                image = np.transpose(image, (1, 2, 0))
+                
+                # Handle NaN values
+                image = np.nan_to_num(image)
+                
+                # Resize image to target size
+                image = tf.image.resize(image, self.image_size).numpy()
+                
+                # Remove zero-padding (areas outside the actual plot)
+                mask = np.any(image != 0, axis=2)
+                if not np.any(mask):
+                    return None
+                
+                # Calculate normalized vegetation indices
+                image_with_indices = self._calculate_vegetation_indices(image)
+                if image_with_indices is None:
+                    return None
+                    
+                return image_with_indices
+                
+        except (RasterioIOError, ValueError, TypeError) as e:
+            if self.config.verbose:
+                print(f"Error processing {file_path}: {e}")
+            return None
+    
+    def _calculate_vegetation_indices(self, image):
+        """Calculate vegetation indices from the satellite bands"""
+        try:
+            # Extract bands (assuming order: NIR, red edge, red, green, blue, deep blue)
+            if image.shape[2] < 5:
+                # Not enough bands
+                return None
+                
+            nir = image[:, :, 0]
+            red_edge = image[:, :, 1]
+            red = image[:, :, 2]
+            green = image[:, :, 3]
+            blue = image[:, :, 4]
+            
+            # Calculate indices with error protection
+            # NDVI (Normalized Difference Vegetation Index)
+            epsilon = 1e-8  # Small value to prevent division by zero
+            ndvi = np.zeros_like(nir)
+            valid = (nir + red) != 0
+            ndvi[valid] = (nir[valid] - red[valid]) / (nir[valid] + red[valid] + epsilon)
+            
+            # GNDVI (Green Normalized Difference Vegetation Index)
+            gndvi = np.zeros_like(nir)
+            valid = (nir + green) != 0
+            gndvi[valid] = (nir[valid] - green[valid]) / (nir[valid] + green[valid] + epsilon)
+            
+            # NDRE (Normalized Difference Red Edge)
+            ndre = np.zeros_like(nir)
+            valid = (nir + red_edge) != 0
+            ndre[valid] = (nir[valid] - red_edge[valid]) / (nir[valid] + red_edge[valid] + epsilon)
+            
+            # EVI (Enhanced Vegetation Index)
+            evi = 2.5 * ((nir - red) / (nir + 6 * red - 7.5 * blue + 1 + epsilon))
+            
+            # Clip extreme values
+            ndvi = np.clip(ndvi, -1, 1)
+            gndvi = np.clip(gndvi, -1, 1)
+            ndre = np.clip(ndre, -1, 1)
+            evi = np.clip(evi, -10, 10)
+            
+            # Stack indices
+            indices = np.stack([ndvi, gndvi, ndre, evi], axis=2)
+            
+            # Combine with original image
+            image_with_indices = np.concatenate([image, indices], axis=2)
+            
+            return image_with_indices
+            
+        except Exception as e:
+            if self.config.verbose:
+                print(f"Error calculating vegetation indices: {e}")
+            return None
+    
+    def find_tiff_files(self, ground_truth):
+        """Find TIFF files corresponding to ground truth data"""
+        print("\nSearching for TIFF files...")
+        
+        tiff_mapping = {}
+        plot_data = []
+        
+        # Track stats
+        total_plots = len(ground_truth)
+        found_plots = 0
+        
+        # Time points to consider
+        time_points = self.config.time_points.split(',') if self.config.time_points else None
+        
+        # Process each plot record
+        for idx, row in tqdm(ground_truth.iterrows(), total=len(ground_truth), desc="Mapping plots to TIFFs"):
+            field = row['field']
+            range_val = row['range']
+            row_val = row['row']
+            year = row.get('year', None)
+            
+            # Skip if we don't have valid identifiers
+            if not all([isinstance(val, (int, str)) for val in [field, range_val, row_val]]):
+                continue
+                
+            # Determine base path based on year
+            if year == 2022 or year is None:
+                base_path = os.path.join(self.data_dir, "Satellite", str(field))
+            elif year == 2023:
+                base_path = os.path.join(self.data_dir, "Satellite", str(field))
+            else:
+                continue
+                
+            # Skip if the base directory doesn't exist
+            if not os.path.exists(base_path):
+                continue
+            
+            # Find all time point directories
+            tp_dirs = [d for d in os.listdir(base_path) 
+                      if os.path.isdir(os.path.join(base_path, d)) and d.startswith("TP")]
+            
+            # Filter time points if specified
+            if time_points:
+                tp_dirs = [d for d in tp_dirs if any(tp in d for tp in time_points)]
+            
+            # Skip if no time point directories
+            if not tp_dirs:
+                continue
+                
+            # Check each time point for matching TIFF file
+            for tp_dir in tp_dirs:
+                # Construct expected filename patterns
+                filename_patterns = [
+                    f"{field}-{tp_dir}-hybrids_{range_val}_{row_val}.TIF",
+                    f"{field}-{tp_dir}-hybrids_{range_val}_{row_val}.tif"
+                ]
+                
+                # Try each pattern
+                for pattern in filename_patterns:
+                    file_path = os.path.join(base_path, tp_dir, pattern)
+                    if os.path.exists(file_path):
+                        # If we find a matching file, store the mapping and plot data
+                        if file_path not in tiff_mapping:
+                            tiff_mapping[file_path] = {
+                                'field': field,
+                                'time_point': tp_dir,
+                                'range': range_val,
+                                'row': row_val,
+                                'year': year,
+                                'yield': row['yieldPerAcre'],
+                                'days_to_anthesis': row.get('daysToAnthesis', None),
+                                'gdd_to_anthesis': row.get('GDDToAnthesis', None),
+                                'total_stand_count': row.get('totalStandCount', None)
+                            }
+                            plot_data.append({
+                                'file_path': file_path,
+                                **tiff_mapping[file_path]
+                            })
+                            found_plots += 1
+                        break
+        
+        # Convert plot data to DataFrame
+        plot_df = pd.DataFrame(plot_data)
+        
+        print(f"Found {found_plots} TIFF files matching ground truth data out of {total_plots} plots")
+        
+        # Save the mapping to CSV for reference
+        mapping_file = os.path.join(self.model_dir, "tiff_mapping.csv")
+        plot_df.to_csv(mapping_file, index=False)
+        print(f"Saved TIFF mapping to {mapping_file}")
+        
+        return plot_df
+    
+    def prepare_dataset(self, plot_df):
+        """Prepare training and validation datasets"""
+        print("\nPreparing datasets...")
+        
+        X_data = []
+        y_data = []
+        skipped = 0
+        
+        # Process each TIFF file and corresponding yield
+        for idx, row in tqdm(plot_df.iterrows(), total=len(plot_df), desc="Processing TIFF files"):
+            file_path = row['file_path']
+            yield_value = row['yield']
+            
+            # Load and process the TIFF file
+            processed_image = self.load_and_process_tiff(file_path)
+            
+            if processed_image is not None:
+                X_data.append(processed_image)
+                y_data.append(yield_value)
+            else:
+                skipped += 1
+                
+        print(f"Processed {len(X_data)} TIFF files successfully, skipped {skipped} files")
+        
+        if len(X_data) == 0:
+            raise ValueError("No valid TIFF files could be processed. Check file paths and format.")
+        
+        # Convert to numpy arrays
+        X = np.array(X_data)
+        y = np.array(y_data)
+        
+        # Print shapes
+        print(f"Input shape: {X.shape}")
+        print(f"Output shape: {y.shape}")
+        
+        # Split data into training and validation sets
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=self.config.val_split, random_state=self.random_seed
+        )
+        
+        # Scale the target variable
+        y_train_scaled = self.output_scaler.fit_transform(y_train.reshape(-1, 1)).flatten()
+        y_val_scaled = self.output_scaler.transform(y_val.reshape(-1, 1)).flatten()
+        
+        # Save the scaler
+        with open(os.path.join(self.model_dir, "yield_scaler.pkl"), 'wb') as f:
+            pickle.dump(self.output_scaler, f)
+        
+        print(f"Training set: {X_train.shape[0]} samples")
+        print(f"Validation set: {X_val.shape[0]} samples")
+        
+        return X_train, X_val, y_train_scaled, y_val_scaled, y_train, y_val
+    
+    def build_model(self, input_shape):
+        """Build the CNN model for yield prediction"""
+        print(f"\nBuilding model for input shape {input_shape}...")
+        
+        # Select model architecture
+        if self.config.model_type == "simple":
+            return self._build_simple_model(input_shape)
+        elif self.config.model_type == "resnet":
+            return self._build_resnet_model(input_shape)
+        elif self.config.model_type == "inception":
+            return self._build_inception_model(input_shape)
+        else:
+            return self._build_standard_model(input_shape)
+    
+    def _build_standard_model(self, input_shape):
+        """Build a standard CNN model"""
+        inputs = layers.Input(shape=input_shape)
+        
+        # First convolutional block
+        x = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(inputs)
+        x = layers.BatchNormalization()(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        # Second convolutional block
+        x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        # Third convolutional block
+        x = layers.Conv2D(128, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        # Fourth convolutional block
+        x = layers.Conv2D(256, (3, 3), activation='relu', padding='same')(x)
+        x = layers.BatchNormalization()(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        # Global pooling and fully connected layers
+        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.Dropout(0.5)(x)
+        x = layers.Dense(64, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+        
+        # Output layer (regression)
+        outputs = layers.Dense(1)(x)
+        
+        model = models.Model(inputs=inputs, outputs=outputs)
+        model.compile(
+            optimizer=optimizers.Adam(learning_rate=self.learning_rate),
+            loss='mse',
+            metrics=['mae']
+        )
+        
+        return model
+    
+    def _build_simple_model(self, input_shape):
+        """Build a simpler CNN model for faster training"""
+        inputs = layers.Input(shape=input_shape)
+        
+        # Simpler architecture with fewer layers
+        x = layers.Conv2D(32, (3, 3), activation='relu', padding='same')(inputs)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        x = layers.Conv2D(64, (3, 3), activation='relu', padding='same')(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Dense(64, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+        
+        outputs = layers.Dense(1)(x)
+        
+        model = models.Model(inputs=inputs, outputs=outputs)
+        model.compile(
+            optimizer=optimizers.Adam(learning_rate=self.learning_rate),
+            loss='mse',
+            metrics=['mae']
+        )
+        
+        return model
+    
+    def _build_resnet_model(self, input_shape):
+        """Build a ResNet-style model with skip connections"""
+        inputs = layers.Input(shape=input_shape)
+        
+        # Initial convolution
+        x = layers.Conv2D(64, (7, 7), strides=(2, 2), padding='same')(inputs)
+        x = layers.BatchNormalization()(x)
+        x = layers.Activation('relu')(x)
+        x = layers.MaxPooling2D((3, 3), strides=(2, 2), padding='same')(x)
+        
+        # Residual blocks
+        def residual_block(x, filters, strides=1):
+            shortcut = x
+            
+            # First convolution
+            x = layers.Conv2D(filters, (3, 3), strides=strides, padding='same')(x)
+            x = layers.BatchNormalization()(x)
+            x = layers.Activation('relu')(x)
+            
+            # Second convolution
+            x = layers.Conv2D(filters, (3, 3), padding='same')(x)
+            x = layers.BatchNormalization()(x)
+            
+            # Shortcut connection
+            if strides > 1 or shortcut.shape[-1] != filters:
+                shortcut = layers.Conv2D(filters, (1, 1), strides=strides, padding='same')(shortcut)
+                shortcut = layers.BatchNormalization()(shortcut)
+            
+            # Add shortcut to output
+            x = layers.add([x, shortcut])
+            x = layers.Activation('relu')(x)
+            
+            return x
+        
+        # Stack of residual blocks
+        x = residual_block(x, 64)
+        x = residual_block(x, 64)
+        
+        x = residual_block(x, 128, strides=2)
+        x = residual_block(x, 128)
+        
+        x = residual_block(x, 256, strides=2)
+        x = residual_block(x, 256)
+        
+        # Global pooling and output
+        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.Dropout(0.5)(x)
+        
+        outputs = layers.Dense(1)(x)
+        
+        model = models.Model(inputs=inputs, outputs=outputs)
+        model.compile(
+            optimizer=optimizers.Adam(learning_rate=self.learning_rate),
+            loss='mse',
+            metrics=['mae']
+        )
+        
+        return model
+    
+    def _build_inception_model(self, input_shape):
+        """Build an Inception-style model with parallel paths"""
+        inputs = layers.Input(shape=input_shape)
+        
+        # Initial convolution
+        x = layers.Conv2D(32, (3, 3), padding='same', activation='relu')(inputs)
+        x = layers.BatchNormalization()(x)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        # Inception module
+        def inception_module(x, filters_1x1, filters_3x3_reduce, filters_3x3, filters_5x5_reduce, filters_5x5, filters_pool):
+            # 1x1 branch
+            branch1x1 = layers.Conv2D(filters_1x1, (1, 1), padding='same', activation='relu')(x)
+            
+            # 3x3 branch
+            branch3x3 = layers.Conv2D(filters_3x3_reduce, (1, 1), padding='same', activation='relu')(x)
+            branch3x3 = layers.Conv2D(filters_3x3, (3, 3), padding='same', activation='relu')(branch3x3)
+            
+            # 5x5 branch
+            branch5x5 = layers.Conv2D(filters_5x5_reduce, (1, 1), padding='same', activation='relu')(x)
+            branch5x5 = layers.Conv2D(filters_5x5, (5, 5), padding='same', activation='relu')(branch5x5)
+            
+            # Pooling branch
+            branch_pool = layers.MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
+            branch_pool = layers.Conv2D(filters_pool, (1, 1), padding='same', activation='relu')(branch_pool)
+            
+            # Concatenate branches
+            return layers.concatenate([branch1x1, branch3x3, branch5x5, branch_pool], axis=-1)
+        
+        # Stack of Inception modules
+        x = inception_module(x, 64, 48, 64, 8, 16, 16)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        x = inception_module(x, 128, 64, 128, 16, 32, 32)
+        x = layers.MaxPooling2D((2, 2))(x)
+        
+        # Global pooling and output
+        x = layers.GlobalAveragePooling2D()(x)
+        x = layers.Dense(128, activation='relu')(x)
+        x = layers.Dropout(0.5)(x)
+        x = layers.Dense(64, activation='relu')(x)
+        x = layers.Dropout(0.3)(x)
+        
+        outputs = layers.Dense(1)(x)
+        
+        model = models.Model(inputs=inputs, outputs=outputs)
+        model.compile(
+            optimizer=optimizers.Adam(learning_rate=self.learning_rate),
+            loss='mse',
+            metrics=['mae']
+        )
+        
+        return model
+    
+    def train_model(self, X_train, X_val, y_train, y_val):
+        """Train the model and return the training history"""
+        print("\nTraining model...")
+        
+        # Build model
+        input_shape = X_train.shape[1:]
+        model = self.build_model(input_shape)
+        
+        # Print model summary
+        model.summary()
+        
+        # Save model architecture diagram if graphviz is available
+        try:
+            from tensorflow.keras.utils import plot_model
+            plot_model(model, to_file=os.path.join(self.model_dir, "model_architecture.png"), 
+                      show_shapes=True, show_layer_names=True)
+        except ImportError:
+            print("Skipping model architecture visualization (graphviz not available)")
+        
+        # Callbacks
+        callbacks = [
+            EarlyStopping(
+                monitor='val_loss',
+                patience=20,
+                restore_best_weights=True,
+                verbose=1
+            ),
+            ModelCheckpoint(
+                os.path.join(self.model_dir, "best_model.h5"),
+                save_best_only=True,
+                monitor='val_loss',
+                verbose=1
+            ),
+            ReduceLROnPlateau(
+                monitor='val_loss',
+                factor=0.5,
+                patience=10,
+                min_lr=1e-6,
+                verbose=1
+            ),
+            TensorBoard(
+                log_dir=self.log_dir,
+                histogram_freq=1,
+                write_graph=True
+            )
+        ]
+        
+        # Create TensorFlow datasets for memory efficiency
+        train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+        train_dataset = train_dataset.shuffle(buffer_size=min(1000, len(X_train))).batch(self.batch_size)
+        
+        val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val))
+        val_dataset = val_dataset.batch(self.batch_size)
+        
+        # Train the model
+        start_time = time.time()
+        history = model.fit(
+            train_dataset,
+            epochs=self.epochs,
+            validation_data=val_dataset,
+            callbacks=callbacks,
+            verbose=1
+        )
+        training_time = time.time() - start_time
+        
+        print(f"\nTraining completed in {training_time:.2f} seconds")
+        
+        # Save the final model
+        model.save(os.path.join(self.model_dir, "final_model.h5"))
+        print(f"Model saved to {os.path.join(self.model_dir, 'final_model.h5')}")
+        
+        return model, history
+    
+    def evaluate_model(self, model, X_val, y_val_scaled, y_val):
+        """Evaluate the trained model and generate plots"""
+        print("\nEvaluating model...")
+        
+        # Make predictions
+        y_pred_scaled = model.predict(X_val)
+        
+        # Inverse transform to original scale
+        y_pred = self.output_scaler.inverse_transform(y_pred_scaled).flatten()
+        
+        # Calculate metrics
+        mse = np.mean((y_pred - y_val) ** 2)
+        rmse = np.sqrt(mse)
+        mae = np.mean(np.abs(y_pred - y_val))
+        
+        # Calculate R² (coefficient of determination)
+        ss_tot = np.sum((y_val - np.mean(y_val)) ** 2)
+        ss_res = np.sum((y_val - y_pred) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+        
+        print("\nModel Performance Metrics:")
+        print(f"Mean Squared Error (MSE): {mse:.2f}")
+        print(f"Root Mean Squared Error (RMSE): {rmse:.2f}")
+        print(f"Mean Absolute Error (MAE): {mae:.2f}")
+        print(f"R-squared (R²): {r2:.4f}")
+        
+        # Save metrics to file
+        with open(os.path.join(self.model_dir, "metrics.txt"), "w") as f:
+            f.write(f"Mean Squared Error (MSE): {mse:.4f}\n")
+            f.write(f"Root Mean Squared Error (RMSE): {rmse:.4f}\n")
+            f.write(f"Mean Absolute Error (MAE): {mae:.4f}\n")
+            f.write(f"R-squared (R²): {r2:.4f}\n")
+            f.write(f"Training configuration:\n")
+            for key, value in vars(self.config).items():
+                f.write(f"  {key}: {value}\n")
+        
+        # Plot predictions vs actual
+        plt.figure(figsize=(10, 6))
+        plt.scatter(y_val, y_pred, alpha=0.5)
+        plt.plot([y_val.min(), y_val.max()], [y_val.min(), y_val.max()], 'r--')
+        plt.xlabel('Actual Yield (bushels/acre)')
+        plt.ylabel('Predicted Yield (bushels/acre)')
+        plt.title(f'Actual vs Predicted Maize Yield (R² = {r2:.4f})')
+        plt.savefig(os.path.join(self.model_dir, 'yield_prediction_
