@@ -1,187 +1,34 @@
-# Maize Yield Prediction Using TensorFlow
+# Crop performance, aerial, and satellite data from multistate maize yield trials
 
-A machine learning application for predicting maize crop yields from multi-spectral satellite imagery using TensorFlow.
+[https://doi.org/10.5061/dryad.905qftttm](https://doi.org/10.5061/dryad.905qftttm)
 
-## Project Overview
+Maize (*Zea mays*) field experiments were conducted at five locations in 2022: Scottsbluff, NE, Lincoln, NE, Missouri Valley, IA, and Ames, IA  with two-thirds of the experiment in one field and one-third of the experiment in another field and Crawfordsville, IA.
 
-This application analyzes satellite imagery data from 2022 and 2023 maize field experiments to predict crop yields. It leverages deep learning to extract meaningful features from multi-spectral satellite images and correlates them with ground truth yield data.
+This file describes the organization and format of the satellite, UAV, and ground truth data published in Shrestha et al. In addition, we provide an example code for searching and retrieving images from individual hybrid corn research plots as well as calculating the wavelength intensity values and indices employed in our study.
 
-### Key Features
+## Directory Layout:
 
-- **Multi-spectral image analysis**: Processes 6-band satellite images (near-infrared, red edge, red, green, blue, and deep blue)
-- **Vegetation indices calculation**: Automatically computes NDVI, GNDVI, NDRE, and EVI indices
-- **Temporal analysis**: Integrates data from multiple time points throughout the growing season
-- **Deep learning architecture**: Uses CNNs to extract spatial features from satellite imagery
-- **Yield prediction**: Predicts maize yield in bushels per acre
-
-## Dataset
-
-The model is designed to work with the maize crop performance dataset that includes:
-
-- **Satellite imagery**: Multi-spectral TIFF files with 6 bands (near-infrared, red edge, red, green, blue, and deep blue)
-- **Ground truth data**: CSV files containing yield measurements and other crop metrics
-- **Multiple locations**: Data from fields in Nebraska and Iowa (2022-2023)
-- **Temporal data**: Multiple time points (TP1-TP6) throughout the growing season
-
-## Requirements
-
-- Python 3.7+
-- TensorFlow 2.x
-- numpy
-- pandas
-- rasterio
-- scikit-learn
-- matplotlib
-- tqdm
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/maize-yield-prediction.git
-cd maize-yield-prediction
-
-# Create a virtual environment (optional but recommended)
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-## Data Preparation
-
-1. Organize your data according to the following directory structure:
-   ```
-   data/
-   ├── Satellite/
-   │   ├── Lincoln/
-   │   │   ├── TP1/
-   │   │   │   ├── Lincoln-TP1-hybrids_1_1.TIF
-   │   │   │   ├── Lincoln-TP1-hybrids_1_2.TIF
-   │   │   │   └── ...
-   │   │   ├── TP2/
-   │   │   └── ...
-   │   ├── Missouri Valley/
-   │   └── ...
-   ├── GroundTruth/
-   │   ├── HYBRID_HIPS_V3.5_ALLPLOTS.csv  # 2022 data
-   │   ├── train_HIPS_HYBRIDS_2023_V2.3.csv  # 2023 data
-   │   └── DateofCollection.xlsx
-   └── Documentation/
-       └── ...
-   ```
-
-2. Update the `DATA_DIR` path in the configuration section of the code.
-
-## Usage
-
-### Basic Training
-
-```python
-from maize_yield_predictor import MaizeYieldPredictor
-
-# Initialize the predictor
-predictor = MaizeYieldPredictor(data_dir="/path/to/data")
-
-# Run the full pipeline
-model, metrics = predictor.run_pipeline()
-
-# Save the model
-predictor.save_model(model)
-```
-
-### Custom Training
-
-```python
-# Customize training parameters
-model, metrics = predictor.run_pipeline(
-    years=[2023],  # Use only 2023 data
-    locations=["Lincoln", "Missouri Valley"],  # Specific locations
-    time_points=[1, 2, 3]  # Specific time points
-)
-```
-
-### Making Predictions
-
-```python
-# Load a saved model and make predictions
-from tensorflow.keras.models import load_model
-import pickle
-
-# Load model and scaler
-model = load_model("models/maize_yield_predictor.h5")
-with open("models/yield_scaler.pkl", "rb") as f:
-    scaler = pickle.load(f)
-
-# Initialize predictor with scaler
-predictor = MaizeYieldPredictor(data_dir="/path/to/data")
-predictor.scaler = scaler
-
-# Predict on new images
-image_paths = [
-    "/path/to/new/images/Lincoln-TP1-hybrids_1_1.TIF",
-    "/path/to/new/images/Lincoln-TP1-hybrids_1_2.TIF"
-]
-predictions = predictor.predict_new_data(model, image_paths)
-
-for path, yield_prediction in predictions:
-    print(f"Image: {path}, Predicted Yield: {yield_prediction:.2f} bushels/acre")
-```
-
-## Model Architecture
-
-The default model architecture is a Convolutional Neural Network (CNN) designed for spatial feature extraction:
-
-- **Input**: Multi-spectral satellite image with vegetation indices (10 channels total)
-- **Convolutional layers**: Multiple convolutional blocks with batch normalization and max pooling
-- **Feature extraction**: Global average pooling to extract features
-- **Fully connected layers**: Dense layers with dropout for regularization
-- **Output**: Single regression output for yield prediction
-
-The code also includes an alternate temporal model architecture that can process multiple time points:
-
-```python
-# Build a temporal model
-time_points = 4  # Number of time points to use
-input_shape = (64, 64, 10)  # (height, width, features)
-temporal_model = build_temporal_model(time_points, input_shape)
-```
-
-## Evaluation
-
-The model is evaluated using several metrics:
-- Mean Squared Error (MSE)
-- Root Mean Squared Error (RMSE)
-- Mean Absolute Error (MAE)
-- R-squared (R²)
-
-Visualizations include:
-- Training and validation loss curves
-- Predicted vs actual yield scatter plots
-
-## Future Improvements
-
-- [ ] Weather data integration
-- [ ] Ensemble modeling
-- [ ] Transfer learning from pre-trained CNNs
-- [ ] Explainability techniques (Grad-CAM)
-- [ ] Web interface for easy model use
-- [ ] Early-season yield forecasting
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgements
-
-- Data sourced from multi-state maize yield trials
-- Inspired by research in precision agriculture and remote sensing
+*   **Satellite**
+    *   Five directories correspond to five of the six locations from which satellite imagery was collected (North Platte, NE was excluded because of issues with plot segmentation).
+    *   Six directories numbered sequentially "TP1", "TP2", "TP3", "TP4", "TP5", and "TP6" corresponding to the order of satellite images collected at each location. Note that the timing of time points with the same number are not identical across locations, and are not guaranteed to be similar. The time of acquisition for each time point at each location is provided in the file **DateofCollection.xlsx** in the folder **"GroundTruth"**.
+    *   .TIF formatted images segmented for each plot at a given location at a given time point. Rows often were at orientations other than 0 or 90 degrees in satellite images. Segmented images consist of the minimum bounding box encompassing the plot of interest, with real pixel data for all plot pixels and zero values entered for all pixels within the minimum bounding box but not part of the plot of interest.
+    *   Plot image names follow the format location-time-experiment_range_row.tif (Lincoln-TP1-hybirds_2_2.TIF). An example implementation of how to map between image names, plot IDs, and ground truth information is provided later in this document. The necessary information to map between ground truth, plot ID, and images is provided in the file **HYBRID_HIPS_V3.5_ALLPLOTS.csv** located in the **"GroundTruth"** folder.
+    *   Each image contains data on six bands per pixel: near-infrared, red edge, red, green, blue, and deep blue.
+    *   **FieldLevelImages** contains field level images before cropping/segmenting to produce plot level images with copyright attribution **© Airbus DS (2022)**. .PNG formatted images names follow location-time-experiment.PNG (Lincoln-TP1-hybrids.PNG).
+*   **UAV**
+    *   Five directories corresponding to five of the six locations from which UAV imagery was collected (as with the satellite images, North Platte, NE UAV images were excluded because of issues with plot segmentation).
+    *   Three directories numbered sequentially "TP1", "TP2", and "TP3" corresponding to the order of UAV flights conducted at each location. Note that the timing of time points with the same number is not identical, and is not guaranteed to be similar across locations. The time of acquisition for each time point at each location is provided in the file **DateofCollection.xlsx** in folder **"GroundTruth"**.
+    *   .PNG formatted images segmented for each plot at a given location at a given time point. Rows often were at orientations other than 0 or 90 degrees in UAV image mosaics. Segmented images consist of the minimum bounding box encompassing the plot of interest, with real pixel data for all plot pixels and zero values entered for all pixels within the minimum bounding box but not part of the plot of interest.
+    *   Plot image names follow the format location-time-experiment_range_row.png (Crawfordsville-TP1-4351_3_15.PNG). An example implementation of how to map between image names, plot IDs, and ground truth information is provided later in this document. The necessary information to map between ground truth, plot ID, and images is provided in the file **HYBRID_HIPS_V3.5_ALLPLOTS.csv** located in the **"GroundTruth"** folder.
+    *   Each image contains data on three bands per pixel: red, green, and blue.
+*   **GroundTruth**
+    *   **HYBRID_HIPS_V3.5_ALLPLOTS.csv** contains one record per hybrid maize plot grown at each of the six locations in this study. Each record includes information on the field, location within the field (row and column), the hybrid genotype planted in that plot, and a set of ground truth data collected from that plot. The individual ground truth measurements are defined below
+        *   plantingDate: the date the plot was planted.
+        *   totalStandCount: The number of living plants observed in the middle two rows of the four-row plot. Note that plots are variable length between locations, so this needs to be corrected for plot size to calculate the density of plants per unit area.
+        *   daysToAnthesis: The difference between the planting date and the first date where at least 50% of living plants in the plot had visible anthers present on their tassels (syn. "male flowering"). Not present for all locations.
+        *   GDDToAnthesis: This is a method for quantifying flowering time that corrects for the fact plants grow faster on warm days and slower in the cold. GDD stands for growing degree days. The number of growing degree days per day was calculated using temperatures in Fahrenheit with a crop base temperature of 50 degrees and a crop maximum temperature of 86 degrees.
+        *   yieldPerAcre: estimated grain yield per plot. This measurement starts with the direct measurement of grain pass per plot and grain moisture percentage and then corrects for variation in moisture content and differences in plot size across locations to calculate bushels per acre yield at a standardized 15.5% moisture content.
+    *   **DateofCollection.xlsx** translates location + TP1/2/3/etc into the specific date of image collection for both UAV and Satellite images collected at all locations included in this study.
+*   **Documentation**
+    *   Documentation.ipynb: example code for extracting images, calculating different indices, and linking images/indices to the ground truth data.
+    *   Readme.md: explaination of data types and layout.
