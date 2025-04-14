@@ -653,7 +653,7 @@ class TiffModelTrainer:
         
         return model, history
     
-    def evaluate_model(self, model, X_val, y_val_scaled, y_val):
+  def evaluate_model(self, model, X_val, y_val_scaled, y_val):
     """Evaluate the trained model and generate plots"""
     print("\nEvaluating model...")
     
